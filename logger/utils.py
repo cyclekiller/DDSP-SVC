@@ -118,5 +118,8 @@ def load_model(
         global_step = ckpt['global_step']
         model.load_state_dict(ckpt['model'], strict=False)
         if ckpt.get('optimizer') != None:
-            optimizer.load_state_dict(ckpt['optimizer'])
+            try:
+                optimizer.load_state_dict(ckpt['optimizer'])
+            except ValueError:
+                pass
     return global_step, model, optimizer

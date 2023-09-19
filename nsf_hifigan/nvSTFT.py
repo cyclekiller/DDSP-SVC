@@ -90,8 +90,12 @@ class STFT():
             mel = librosa_mel_fn(sr=sampling_rate, n_fft=n_fft, n_mels=n_mels, fmin=fmin, fmax=fmax)
             self.mel_basis[mel_basis_key] = torch.from_numpy(mel).float().to(y.device)
         
-        keyshift_key = str(keyshift)+'_'+str(y.device)
-        if keyshift_key not in self.hann_window:
+        if int(keyshift) == keyshift:
+            keyshift_key = str(keyshift)+'_'+str(y.device)
+            if keyshift_key not in self.hann_window:
+                self.hann_window[keyshift_key] = torch.hann_window(win_size_new).to(y.device)
+        else:
+            keyshift_key = "tmp"
             self.hann_window[keyshift_key] = torch.hann_window(win_size_new).to(y.device)
         
         pad_left = (win_size_new - hop_length_new) //2

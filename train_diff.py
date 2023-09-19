@@ -57,31 +57,51 @@ if __name__ == '__main__':
                 pcmer_norm=args.model.pcmer_norm)
         print(' > pcmer_norm:', args.model.pcmer_norm)
                 
+        if args.discriminator == "formant":
+            from formant.formant_discriminator import FormantDiscriminator
+
+            discriminator = FormantDiscriminator()
     else:
         raise ValueError(f" [x] Unknown Model: {args.model.type}")
     
     # load parameters
     optimizer = torch.optim.AdamW(model.parameters())
+    optimizer_d = torch.optim.AdamW(discriminator.parameters())
     initial_global_step, model, optimizer = utils.load_model(args.env.expdir, model, optimizer, device=args.device)
-    for param_group in optimizer.param_groups:
+
+    # load discriminator (if exists)
+    try:
+        ckpt = torch.load(
+            args.env.expdir + "/discriminator.pt", map_location=args.device
+        )
+        discriminator.combine_discriminator = ckpt["discriminator"]
+        optimizer_d = ckpt["optimizer_d"]
+    except FileNotFoundError:
+        pass
+
+    for param_group in optimizer.param_groups + optimizer_d.param_groups:
         param_group['initial_lr'] = args.train.lr
         param_group['lr'] = args.train.lr * args.train.gamma ** max((initial_global_step - 2) // args.train.decay_step, 0)
         param_group['weight_decay'] = args.train.weight_decay
     scheduler = lr_scheduler.StepLR(optimizer, step_size=args.train.decay_step, gamma=args.train.gamma, last_epoch=initial_global_step-2)
-    
+    scheduler_d = lr_scheduler.StepLR(optimizer_d, step_size=args.train.decay_step, gamma=args.train.gamma, last_epoch=initial_global_step-2)
     # device
     if args.device == 'cuda':
         torch.cuda.set_device(args.env.gpu_id)
     model.to(args.device)
-    
-    for state in optimizer.state.values():
-        for k, v in state.items():
-            if torch.is_tensor(v):
-                state[k] = v.to(args.device)
+    discriminator.to(args.device)
+
+    for optim in [optimizer, optimizer_d]:
+        for state in optim.state.values():
+            for k, v in state.items():
+                if torch.is_tensor(v):
+                    state[k] = v.to(args.device)
                     
     # datas
     loader_train, loader_valid = get_data_loaders(args, whole_audio=False)
     
     # run
-    train(args, initial_global_step, model, optimizer, scheduler, vocoder, loader_train, loader_valid)
+    train(args, initial_global_step, model,
+        discriminator, optimizer, optimizer_d, scheduler, scheduler_d,
+        vocoder, loader_train, loader_valid)
     

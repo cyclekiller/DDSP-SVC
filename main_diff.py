@@ -363,6 +363,7 @@ if __name__ == '__main__':
                 seg_input_mel = None
                 
             seg_mel = model(
+                    None, None, None,
                     seg_units, 
                     seg_f0, 
                     seg_volume, 

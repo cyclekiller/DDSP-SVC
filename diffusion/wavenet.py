@@ -93,7 +93,7 @@ class WaveNet(nn.Module):
         x = spec.squeeze(1)
         x = self.input_projection(x)  # [B, residual_channel, T]
 
-        x = F.relu(x)
+        x = F.leaky_relu(x, 0.1)
         diffusion_step = self.diffusion_embedding(diffusion_step)
         diffusion_step = self.mlp(diffusion_step)
         skip = []
@@ -103,6 +103,6 @@ class WaveNet(nn.Module):
 
         x = torch.sum(torch.stack(skip), dim=0) / sqrt(len(self.residual_layers))
         x = self.skip_projection(x)
-        x = F.relu(x)
+        x = F.leaky_relu(x, 0.1)
         x = self.output_projection(x)  # [B, mel_bins, T]
         return x[:, None, :, :]

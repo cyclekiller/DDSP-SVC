@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from nsf_hifigan.nvSTFT import STFT
-from nsf_hifigan.models import load_model,load_config
+from nsf_hifigan.models import load_model,load_config, discriminator_loss, generator_loss
 from torchaudio.transforms import Resample
 from .diffusion import GaussianDiffusion
 from .wavenet import WaveNet
@@ -219,10 +219,17 @@ class Unit2Wav(nn.Module):
         super().__init__()
         self.ddsp_model = CombSubFast(sampling_rate, block_size, n_unit, n_spk, use_pitch_aug, pcmer_norm=pcmer_norm)
         self.diff_model = GaussianDiffusion(WaveNet(out_dims, n_layers, n_chans, 256), out_dims=out_dims)
+        self.resample_128_to_257 = Resample(128, 257)
 
-    def forward(self, units, f0, volume, spk_id=None, spk_mix_dict=None, aug_shift=None, vocoder=None,
-                gt_spec=None, infer=True, return_wav=False, infer_speedup=10, method='dpm-solver', k_step=None, use_tqdm=True):
-        
+    def forward(
+        self,
+        #
+        discriminator, optimizer, optimizer_d,
+        #
+        units, f0, volume, spk_id=None, spk_mix_dict=None, aug_shift=None, vocoder=None, gt_spec=None, infer=True, return_wav=False, infer_speedup=10, method='dpm-solver', k_step=None, use_tqdm=True,
+        #
+        global_step=None,
+    ):
         '''
         input: 
             B x n_frames x n_unit
@@ -234,11 +241,77 @@ class Unit2Wav(nn.Module):
             ddsp_mel = vocoder.extract(ddsp_wav)
         else:
             ddsp_mel = None
-            
+
         if not infer:
-            ddsp_loss = F.mse_loss(ddsp_mel, gt_spec)
-            diff_loss = self.diff_model(hidden, gt_spec=gt_spec, k_step=k_step, infer=False)
-            return ddsp_loss, diff_loss
+
+            def d_update():
+                optimizer_d.zero_grad()
+
+                y_d_rs = [discriminator.forward(gt_spec, gt_spec_resampled)]
+                y_d_gs = [
+                    discriminator.forward(
+                        ddsp_mel.detach(), ddsp_mel_resampled.detach()
+                    )
+                ]
+                loss_d, _, _ = discriminator_loss(y_d_rs, y_d_gs)
+
+                loss_d.backward()
+                optimizer_d.step()
+
+            def g_update(no_d=False):
+                if optimizer:
+                    optimizer.zero_grad()
+
+                if no_d:
+                    loss_g = 0
+                else:
+                    y_d_gs = [discriminator.forward(ddsp_mel, ddsp_mel_resampled)]
+                    loss_g, _ = generator_loss(y_d_gs)
+                loss_mel = F.l1_loss(ddsp_mel, gt_spec)  # F.mse_loss
+                ddsp_loss = loss_g + loss_mel
+                diff_loss = self.diff_model(
+                    hidden, gt_spec=gt_spec, k_step=k_step, infer=False
+                )
+
+                # handle nan loss
+                if torch.isnan(ddsp_loss):
+                    raise ValueError(" [x] nan ddsp_loss ")
+                elif torch.isnan(diff_loss):
+                    raise ValueError(" [x] nan diff_loss ")
+                else:
+                    total_loss = ddsp_loss + diff_loss
+                    # backpropagate
+                    if True or dtype == torch.float32:
+                        if discriminator is not None:
+                            total_loss.backward()
+                            # TODO: clip grad norm?
+                            optimizer.step()
+                    # else:
+                    #     scaler.scale(loss).backward()
+                    #     scaler.step(optimizer)
+                    #     scaler.update()
+
+                return {
+                    "loss_g": None if no_d else loss_g,
+                    "loss_mel": loss_mel,
+                    "diff_loss": diff_loss,
+                    "total_loss": total_loss,
+                }
+
+            # print(gt_spec.shape) # [B, 172, 128]
+            # print(gt_wav.shape, ddsp_wav.shape)  # [B, 88064]
+
+            if discriminator is None:
+                return g_update(no_d=True)
+            else:
+                gt_spec_resampled = self.resample_128_to_257(gt_spec)
+                ddsp_mel_resampled = self.resample_128_to_257(ddsp_mel.contiguous())
+
+                if global_step % 10 == 0 and discriminator is not None:
+                    d_update()
+                    return g_update()
+                else:
+                    return g_update(no_d=True)
         else:
             if gt_spec is not None and ddsp_mel is None:
                 ddsp_mel = gt_spec
